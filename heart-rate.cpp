@@ -1,72 +1,178 @@
+#include <Wire.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <Arduino_JSON.h>
 
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <BlynkSimpleEsp32.h>
+#include "PageIndex.h"
 
-// Define the pulse sensor settings
-const int pulsePin = 32; // the pulse sensor pin
-const int ledPin = 33; // the LED pin
-int pulseValue; // the pulse sensor value
-int bpm; // the heart rate in beats per minute
+#define PulseSensor_PIN 34
+#define LED_PIN         23 
+#define Button_PIN      32
 
-// Your WiFi credentialilan.
-// Set password to "" for open networks.
-char auth[] = BLYNK_AUTH_TOKEN;
-char ssid[] = "****";
-char pass[] = "****";
-BlynkTimer timer;
+const char* ssid = "****";
+const char* password = "****";
 
-void setup()
- {
-  // Start the serial communication
-  Serial.begin(9600);
+unsigned long previousMillisGetHB = 0;
+unsigned long previousMillisResultHB = 0;
 
-  // Connect to WiFi
-  WiFi.begin(ssid, pass);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(1000);
-    Serial.println("Connecting to WiFi...");
+const long intervalGetHB = 35;
+const long intervalResultHB = 100;
+
+int timer_Get_BPM = 0;
+
+int PulseSensorSignal;
+int UpperThreshold = 520;
+int LowerThreshold = 500; 
+
+int cntHB = 0;
+boolean ThresholdStat = true;
+int BPMval = 0;
+
+bool get_BPM = false;
+
+byte tSecond = 0;
+byte tMinute = 0;
+byte tHour   = 0;
+
+char tTime[10];
+
+const char* PARAM_INPUT_1 = "BTN_Start_Get_BPM";
+String BTN_Start_Get_BPM = "";
+
+JSONVar JSON_All_Data;
+
+AsyncWebServer server(80);
+AsyncEventSource events("/events");
+
+void GetHeartRate() {
+  unsigned long currentMillisGetHB = millis();
+
+  if (currentMillisGetHB - previousMillisGetHB >= intervalGetHB) {
+    previousMillisGetHB = currentMillisGetHB;
+
+    PulseSensorSignal = analogRead(PulseSensor_PIN);
+
+    if (PulseSensorSignal > UpperThreshold && ThresholdStat == true) {
+      if (get_BPM == true) cntHB++;
+      ThresholdStat = false;
+      digitalWrite(LED_PIN,HIGH);
+    }
+
+    if (PulseSensorSignal < LowerThreshold) {
+      ThresholdStat = true;
+      digitalWrite(LED_PIN,LOW);
+    }
   }
-  Serial.println("Connected to WiFi");
 
-  // Connect to Blynk
-  Blynk.begin(auth, ssid, pass);
-  while (!Blynk.connected()) {
-    Serial.println("Connecting to Blynk...");
-    delay(1000);
+  unsigned long currentMillisResultHB = millis();
+
+  if (currentMillisResultHB - previousMillisResultHB >= intervalResultHB) {
+    previousMillisResultHB = currentMillisResultHB;
+
+    if (get_BPM == true) {
+      timer_Get_BPM++;
+      if (timer_Get_BPM > 10) {
+        timer_Get_BPM = 1;
+
+        tSecond += 10;
+        if (tSecond >= 60) {
+          tSecond = 0;
+          tMinute += 1;
+        }
+        if (tMinute >= 60) {
+          tMinute = 0;
+          tHour += 1;
+        }
+
+        sprintf(tTime, "%02d:%02d:%02d",  tHour, tMinute, tSecond);
+
+        BPMval = cntHB * 6;
+        Serial.print("BPM : ");
+        Serial.println(BPMval);
+        
+        cntHB = 0;
+      }
+    }
   }
-  Serial.println("Connected to Blynk");
-
-  // Set up the pulse sensor
-  pinMode(pulsePin, INPUT);
-  pinMode(ledPin, OUTPUT);
-  digitalWrite(ledPin, LOW);
 }
 
-void loop()
- {
-  // Read the pulse sensor value
-  pulseValue = analogRead(pulsePin);
+void setup() {
+  Serial.begin(115200);
+  analogReadResolution(10);
 
-  // Detect the pulse
-  if (pulseValue > 600) {
-    digitalWrite(ledPin, HIGH); // turn on the LED
-    delay(100); // wait for a short time
-    digitalWrite(ledPin, LOW); // turn off the LED
-    bpm = 60000 / pulseValue; // calculate the heart rate in beats per minute
-    Serial.print("Heart rate: ");
-    Serial.print(bpm);
-    Serial.println(" BPM");
+  pinMode(LED_PIN,OUTPUT); 
+  pinMode(Button_PIN, INPUT_PULLUP);
 
-    // Send the heart rate to Blynk
-    Blynk.virtualWrite(V4, bpm);
-    delay(200);
+  sprintf(tTime, "%02d:%02d:%02d",  tHour, tMinute, tSecond);
 
-    // Print the heart rate on the serial monitor
-    String message = "Heart rate: " + String(bpm) + " BPM";
-    Serial.println(message);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  int connecting_process_timed_out = 20;
+  connecting_process_timed_out = connecting_process_timed_out * 2;
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    if (connecting_process_timed_out > 0) connecting_process_timed_out--;
+    if (connecting_process_timed_out == 0) {
+      delay(1000);
+      ESP.restart();
+    }
   }
 
-  // Run the Blynk loop
-  Blynk.run();
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/html", MAIN_page);
+  });
+
+  events.onConnect([](AsyncEventSourceClient * client) {
+    if (client->lastId()) {
+      Serial.printf("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
+    }
+    client->send("hello!", NULL, millis(), 10000);
+  });
+
+  server.on("/BTN_Comd", HTTP_GET, [] (AsyncWebServerRequest * request) {
+    if (request->hasParam(PARAM_INPUT_1)) {
+      BTN_Start_Get_BPM = request->getParam(PARAM_INPUT_1)->value();
+      Serial.println();
+      Serial.print("BTN_Start_Get_BPM : ");
+      Serial.println(BTN_Start_Get_BPM);
+    }
+    else {
+      BTN_Start_Get_BPM = "No message";
+      Serial.println();
+      Serial.print("BTN_Start_Get_BPM : ");
+      Serial.println(BTN_Start_Get_BPM);
+    }
+    request->send(200, "text/plain", "OK");
+  });
+
+  server.addHandler(&events);
+  server.begin();
+
+  Serial.println("------------");
+  Serial.print("ESP32 IP address : ");
+  Serial.println(WiFi.localIP());
+  Serial.println("------------");
+}
+
+void loop() {
+  if (digitalRead(Button_PIN) == LOW || BTN_Start_Get_BPM == "START" || BTN_Start_Get_BPM == "STOP") {
+    delay(100);
+    BTN_Start_Get_BPM = "";
+    cntHB = 0;
+    BPMval = 0;
+    tSecond = 0;
+    tMinute = 0;
+    tHour   = 0;
+    sprintf(tTime, "%02d:%02d:%02d",  tHour, tMinute, tSecond);
+    get_BPM = !get_BPM;
+    if (get_BPM == true) {
+      Serial.println("Start Getting BPM");
+    }
+    else {
+      Serial.println("STOP");
+    }
+  }
+
+  GetHeartRate();
 }
